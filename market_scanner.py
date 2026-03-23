@@ -32,6 +32,7 @@ class MarketScanner:
     def __init__(self):
         self._session = requests.Session()
         self._cache = {}   # slug -> market data
+        self._max_cache_age = 2 * WINDOW_SEC  # evict entries older than 2 windows
 
     def current_window(self):
         """Return the current 5-min window start timestamp."""
@@ -53,6 +54,12 @@ class MarketScanner:
         """
         if ts is None:
             ts = self.current_window()
+
+        # Evict stale cache entries
+        cutoff = ts - self._max_cache_age
+        stale = [s for s, m in self._cache.items() if m.get("window_ts", 0) < cutoff]
+        for s in stale:
+            del self._cache[s]
 
         slug = SLUG_PATTERN.format(asset=asset, ts=ts)
 

@@ -77,9 +77,9 @@ class Executor:
         self._last_call = time.time()
 
     def buy(self, token_id: str, size_usdc: float, price: float,
-            neg_risk: bool = False) -> str | None:
+            neg_risk: bool = False) -> dict | None:
         """
-        Place a BUY limit order.
+        Place a BUY IOC order.
 
         Args:
             token_id:  CLOB token ID
@@ -88,14 +88,15 @@ class Executor:
             neg_risk:  neg_risk flag for the market
 
         Returns:
-            order_id string or None on failure.
+            {"order_id": str, "filled_usdc": float, "filled_tokens": float, "price": float}
+            or None on failure / no fill.
         """
         return self._place("BUY", token_id, size_usdc, price, neg_risk)
 
     def sell(self, token_id: str, qty_tokens: float, price: float,
-             neg_risk: bool = False) -> str | None:
+             neg_risk: bool = False) -> dict | None:
         """
-        Place a SELL limit order.
+        Place a SELL IOC order.
 
         Args:
             token_id:   CLOB token ID
@@ -104,14 +105,21 @@ class Executor:
             neg_risk:   neg_risk flag for the market
 
         Returns:
-            order_id string or None on failure.
+            {"order_id": str, "filled_usdc": float, "filled_tokens": float, "price": float}
+            or None on failure / no fill.
         """
-        # Convert qty to usdc-equivalent for unified interface
         size_usdc = qty_tokens * price
         return self._place("SELL", token_id, size_usdc, price, neg_risk)
 
     def _place(self, side: str, token_id: str, size_usdc: float,
-               price: float, neg_risk: bool) -> str | None:
+               price: float, neg_risk: bool) -> dict | None:
+        """
+        Place an IOC order and return fill info.
+
+        Returns:
+            {"order_id": str, "filled_usdc": float, "filled_tokens": float, "price": float}
+            or None on failure / no fill.
+        """
         if price <= 0 or price >= 1.0:
             logger.error(f"Invalid price {price} for {side}")
             return None
@@ -128,41 +136,83 @@ class Executor:
                 f"🔒 [DRY] {side} {qty:.3f} tokens @ ${price:.2f} "
                 f"= ${size_usdc:.2f} | {token_id[:16]}..."
             )
-            return order_id
+            return {
+                "order_id": order_id,
+                "filled_usdc": size_usdc,
+                "filled_tokens": qty,
+                "price": price,
+            }
 
         try:
-            from py_clob_client.clob_types import MarketOrderArgs, PartialCreateOrderOptions
+            from py_clob_client.clob_types import OrderArgs, PartialCreateOrderOptions, OrderType
 
             with self._lock:
                 self._rate_limit()
-                args = MarketOrderArgs(
+                args = OrderArgs(
                     token_id=token_id,
-                    amount=size_usdc,
+                    price=price,
+                    size=qty,
                     side=side,
                 )
                 opts = PartialCreateOrderOptions(
                     tick_size=TICK_SIZE,
                     neg_risk=neg_risk,
                 )
-                from py_clob_client.clob_types import OrderType
-                signed = self._client.create_market_order(args, options=opts)
-                resp = self._client.post_order(signed, orderType=OrderType.FOK)
+                signed = self._client.create_order(args, options=opts)
+                resp = self._client.post_order(signed, orderType=OrderType.IOC)
 
+            # Parse order ID and status
+            order_id = None
+            status = ""
             if isinstance(resp, dict):
                 order_id = resp.get("orderID") or resp.get("id", "")
+                status = str(resp.get("status", "")).upper()
             elif hasattr(resp, "orderID"):
                 order_id = resp.orderID
+                status = str(getattr(resp, "status", "")).upper()
             else:
                 order_id = str(resp) if resp else None
 
-            if order_id:
-                logger.info(
-                    f"✅ MARKET {side} ${size_usdc:.2f} | ID: {order_id[:20]}..."
+            # IOC orders that weren't filled at all
+            if status in ("UNMATCHED", "CANCELED", "KILLED"):
+                logger.warning(
+                    f"⚠️  IOC {side} not filled (status={status}) | "
+                    f"{token_id[:16]}..."
                 )
-                return order_id
-            else:
+                return None
+
+            if not order_id:
                 logger.error(f"⚠️  No order ID in response: {resp}")
                 return None
+
+            # Extract actual fill amounts from response when available
+            filled_usdc = size_usdc
+            filled_tokens = qty
+            fill_price = price
+
+            if isinstance(resp, dict):
+                for amt_key in ("matchedAmount", "filledAmount", "takingAmount"):
+                    if amt_key in resp:
+                        try:
+                            val = float(resp[amt_key])
+                            if val > 0:
+                                filled_tokens = val
+                                filled_usdc = val * price
+                                break
+                        except (ValueError, TypeError):
+                            pass
+
+            logger.info(
+                f"✅ IOC {side} ${filled_usdc:.2f} "
+                f"({filled_tokens:.3f} tokens @ ${fill_price:.2f}) | "
+                f"ID: {order_id[:20]}..."
+            )
+            return {
+                "order_id": order_id,
+                "filled_usdc": filled_usdc,
+                "filled_tokens": filled_tokens,
+                "price": fill_price,
+            }
 
         except Exception as e:
             logger.error(f"⚠️  {side} order failed: {e}")

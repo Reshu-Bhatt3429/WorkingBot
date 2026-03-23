@@ -44,34 +44,52 @@ BINANCE_WS_BTC = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
 BINANCE_WS_ETH = "wss://stream.binance.com:9443/ws/ethusdt@aggTrade"
 
 # ═══════════════════════════════════════════════════════════════
-#  HEDGE STRATEGY PARAMETERS
+#  HYBRID HEDGE STRATEGY (inspired by @Hcrystallash)
 # ═══════════════════════════════════════════════════════════════
 
-# Phase 1 — Hedge (open immediately on market start)
-HEDGE_SIZE_USDC     = 1.50   # Buy the cheap side at open (ensures ≥5 tokens at typical prices)
-CHEAP_SIDE_MAX      = 0.42   # Buy hedge when token price is below this
+# Master toggle: True = always hedge, False = single-side directional (legacy)
+HEDGE_ENABLED       = True
 
-# Phase 2 — Main bet (after direction is confirmed)
-MAIN_BET_SIZE_USDC  = 2.00   # Primary directional position
-DIRECTION_THRESHOLD = 0.01   # Any real tick triggers — we're racing market makers
+# Budget allocation (half-Kelly sized for $85 bankroll, 2 assets)
+# $6.14/trade per asset = 7.2% of bankroll = half-Kelly at 68% accuracy
+CONVICTION_BUDGET   = 4.85   # USDC on conviction side
+HEDGE_BUDGET        = 1.29   # USDC on hedge side (small insurance)
+TOTAL_MARKET_BUDGET = 6.14   # conviction + hedge
+
+# Split ratios (used for display/logging)
+CONVICTION_RATIO    = 0.79   # 79% on conviction (directional) side
+HEDGE_RATIO         = 0.21   # 21% on hedge (insurance) side
+
+# Direction detection
+DIRECTION_THRESHOLD = 0.01   # Any real tick triggers — racing market makers
 MAIN_BET_DELAY_SEC  = 0      # Instant — race the market makers
 
-# Phase 3 — Add-on (optional averaging in)
-ADDON_SIZE_USDC     = 0.50   # Add-on to winning side
-ADDON_DELAY_SEC     = 120    # Add-on available after 120s
-ADDON_THRESHOLD     = 0.20   # Need >0.20% move for add-on
+# Scale-in: add to conviction side as direction confirms
+SCALE_IN_ENABLED      = True
+SCALE_IN_COUNT        = 3      # Max additional scale-in orders on conviction side
+SCALE_IN_INTERVAL_SEC = 30     # Seconds between scale-in attempts
+SCALE_IN_THRESHOLD    = 0.05   # Min move_pct to confirm direction for next scale-in
 
 # Position limits per market
-MAX_TOTAL_USDC      = 4.00   # Max total spend per asset per market ($4 BTC + $4 ETH = $8/cycle)
-MAX_ONE_SIDE_USDC   = 3.00   # Never put more than $3 on one direction
+MAX_TOTAL_USDC      = 8.50   # Max total spend per asset per market (hedge + scale-in)
+MAX_ONE_SIDE_USDC   = 7.00   # Never put more than $7 on one direction
 
 # Entry deadline — don't open new positions in last N seconds
 ENTRY_DEADLINE_SEC  = 60
+
+# Legacy parameters (used when HEDGE_ENABLED = False)
+HEDGE_SIZE_USDC     = 1.50
+CHEAP_SIDE_MAX      = 0.42
+MAIN_BET_SIZE_USDC  = 2.00
+ADDON_SIZE_USDC     = 0.50
+ADDON_DELAY_SEC     = 120
+ADDON_THRESHOLD     = 0.20
 
 # ═══════════════════════════════════════════════════════════════
 #  EARLY EXIT
 # ═══════════════════════════════════════════════════════════════
 
+PROFIT_EXIT_ENABLED   = False   # Disabled — hold to expiry is +EV (see bot_optimizations.md)
 PROFIT_EXIT_PCT       = 0.70   # Sell when unrealized profit >= 70%
 PROFIT_CHECK_INTERVAL = 10     # Check every 10 seconds
 
@@ -79,7 +97,7 @@ PROFIT_CHECK_INTERVAL = 10     # Check every 10 seconds
 #  RISK CONTROLS
 # ═══════════════════════════════════════════════════════════════
 
-MAX_DAILY_LOSS_USDC     = 20.0   # Stop trading for the day after $20 loss
+MAX_DAILY_LOSS_USDC     = 30.0   # Stop trading for the day after $30 loss
 MAX_CONSECUTIVE_LOSSES  = 6      # Pause after 6 straight losing markets
 LOSS_COOLDOWN_SEC       = 1800   # 30-minute cooldown after loss streak
 
@@ -115,7 +133,7 @@ DEFAULT_BANKROLL_USDC = 50.0
 # ═══════════════════════════════════════════════════════════════
 
 # Fast-path: skip order book, use fixed limit price to shave ~300ms
-FAST_LIMIT_PRICE    = 0.55   # Submit at $0.55 — fills if ask ≤ $0.55, else sits
+FAST_LIMIT_PRICE    = 0.60   # Submit at $0.60 — GTC limit order, sweeps asks ≤ $0.60
 
 TICK_SIZE           = "0.01"
 ORDER_TIMEOUT_SEC   = 20
