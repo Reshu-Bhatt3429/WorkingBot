@@ -79,7 +79,7 @@ class Executor:
     def buy(self, token_id: str, size_usdc: float, price: float,
             neg_risk: bool = False) -> dict | None:
         """
-        Place a BUY IOC order.
+        Place a BUY FAK order.
 
         Args:
             token_id:  CLOB token ID
@@ -96,7 +96,7 @@ class Executor:
     def sell(self, token_id: str, qty_tokens: float, price: float,
              neg_risk: bool = False) -> dict | None:
         """
-        Place a SELL IOC order.
+        Place a SELL FAK order.
 
         Args:
             token_id:   CLOB token ID
@@ -114,7 +114,7 @@ class Executor:
     def _place(self, side: str, token_id: str, size_usdc: float,
                price: float, neg_risk: bool) -> dict | None:
         """
-        Place an IOC order and return fill info.
+        Place an FAK order and return fill info.
 
         Returns:
             {"order_id": str, "filled_usdc": float, "filled_tokens": float, "price": float}
@@ -159,7 +159,7 @@ class Executor:
                     neg_risk=neg_risk,
                 )
                 signed = self._client.create_order(args, options=opts)
-                resp = self._client.post_order(signed, orderType=OrderType.IOC)
+                resp = self._client.post_order(signed, orderType=OrderType.FAK)
 
             # Parse order ID and status
             order_id = None
@@ -173,10 +173,10 @@ class Executor:
             else:
                 order_id = str(resp) if resp else None
 
-            # IOC orders that weren't filled at all
+            # FAK orders that weren't filled at all
             if status in ("UNMATCHED", "CANCELED", "KILLED"):
                 logger.warning(
-                    f"⚠️  IOC {side} not filled (status={status}) | "
+                    f"⚠️  FAK {side} not filled (status={status}) | "
                     f"{token_id[:16]}..."
                 )
                 return None
@@ -203,7 +203,7 @@ class Executor:
                             pass
 
             logger.info(
-                f"✅ IOC {side} ${filled_usdc:.2f} "
+                f"✅ FAK {side} ${filled_usdc:.2f} "
                 f"({filled_tokens:.3f} tokens @ ${fill_price:.2f}) | "
                 f"ID: {order_id[:20]}..."
             )
