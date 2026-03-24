@@ -18,7 +18,7 @@ import sys
 import csv
 import os
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from config import (
     LIVE_TRADING, MAIN_LOOP_INTERVAL, DISPLAY_INTERVAL,
@@ -123,6 +123,7 @@ class HedgeBot:
             self.daily_pnl = 0.0
             self.consecutive_losses = 0
             self._cooldown_until = 0.0
+            self._loss_limit_logged = False
             self._last_day = today
 
         # ── Balance refresh ───────────────────────────────────
@@ -138,14 +139,33 @@ class HedgeBot:
             return
 
         if self.daily_pnl <= -MAX_DAILY_LOSS_USDC:
-            logger.warning(f"Daily loss limit hit (${self.daily_pnl:+.2f}) — stopped")
-            self._running = False
+            midnight = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            midnight_tomorrow = midnight + timedelta(days=1)
+            pause_secs = (midnight_tomorrow - datetime.now(timezone.utc)).total_seconds()
+            if not getattr(self, '_loss_limit_logged', False):
+                logger.warning(
+                    f"Daily loss limit hit (${self.daily_pnl:+.2f}) — "
+                    f"pausing until midnight UTC ({int(pause_secs)}s)"
+                )
+                self._loss_limit_logged = True
+            self._maybe_display()
             return
+
+        # ── Price staleness check ────────────────────────────
+        stale_assets = [a for a in ASSETS if self.feed.get(a).is_stale]
+        if stale_assets:
+            if int(now) % 30 == 0:
+                logger.warning(
+                    f"Stale price feed: {', '.join(a.upper() for a in stale_assets)} "
+                    f"— skipping new entries"
+                )
 
         # ── New window: discover markets ──────────────────────
         if current_window != self._last_window:
             self._last_window = current_window
-            self._on_new_window(current_window)
+            self._on_new_window(current_window, stale_assets)
 
         # ── Per-asset update ──────────────────────────────────
         for asset in ASSETS:
@@ -170,6 +190,10 @@ class HedgeBot:
                 self._resolve_market(asset)
                 continue
 
+            # Skip scale-ins/updates if price feed is stale
+            if self.feed.get(asset).is_stale:
+                continue
+
             # Update hedge engine (may place orders or trigger early exit)
             self.engine.update(asset, self.feed, remaining)
 
@@ -181,9 +205,11 @@ class HedgeBot:
         # ── Display ───────────────────────────────────────────
         self._maybe_display()
 
-    def _on_new_window(self, window_ts: int):
+    def _on_new_window(self, window_ts: int, stale_assets: list[str] = None):
         """Called at the start of each new 5-minute window."""
         logger.info(f"\nNew window: {datetime.utcfromtimestamp(window_ts).strftime('%H:%M UTC')}")
+        if stale_assets is None:
+            stale_assets = []
 
         for asset in ASSETS:
             # Resolve any lingering position from last window
@@ -191,6 +217,11 @@ class HedgeBot:
                 old_pos = self.engine.positions[asset]
                 if not old_pos.is_closed:
                     self._resolve_market(asset)
+
+            # Skip new entry if price feed is stale
+            if asset in stale_assets:
+                logger.warning(f"  [{asset.upper()}] Price feed stale — skipping entry")
+                continue
 
             # Discover new market
             market = self.scanner.get_market(asset, window_ts)

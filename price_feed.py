@@ -25,12 +25,15 @@ if not logger.handlers:
 class AssetFeed:
     """Single-asset price feed from Binance aggTrade stream."""
 
+    STALE_THRESHOLD = 5.0  # seconds — price older than this is stale
+
     def __init__(self, ws_url: str, name: str):
         self.name = name
         self._ws_url = ws_url
         self.price = 0.0
         self.open_price = 0.0     # Set at market open
         self.open_time = 0.0
+        self.last_update = 0.0    # Timestamp of last price tick
         self._lock = threading.Lock()
         self._running = False
         self._ws_thread = None
@@ -69,6 +72,13 @@ class AssetFeed:
     def is_ready(self):
         return self._running and self.price > 0
 
+    @property
+    def is_stale(self):
+        """True if price hasn't been updated within STALE_THRESHOLD seconds."""
+        if self.last_update == 0:
+            return True
+        return (time.time() - self.last_update) > self.STALE_THRESHOLD
+
     def _loop(self):
         while self._running:
             try:
@@ -90,6 +100,7 @@ class AssetFeed:
             data = json.loads(message)
             with self._lock:
                 self.price = float(data["p"])
+                self.last_update = time.time()
         except Exception:
             pass
 
