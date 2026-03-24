@@ -1,6 +1,7 @@
 """
 Executor — Order placement on Polymarket CLOB.
 Handles live and dry-run modes.
+Uses GTC orders with cancel-on-resolve to prevent stale resting orders.
 """
 
 import time
@@ -29,6 +30,9 @@ class Executor:
     """
     Places BUY / SELL orders on the Polymarket CLOB.
 
+    Uses GTC orders. Tracks open order IDs so they can be cancelled
+    when the market resolves (prevents stale resting orders).
+
     In dry-run mode (LIVE_TRADING=false) all orders are simulated.
     """
 
@@ -37,6 +41,7 @@ class Executor:
         self._lock = threading.Lock()
         self._last_call = 0.0
         self._min_interval = 1.0 / API_RATE_LIMIT
+        self._open_orders: list[str] = []  # track order IDs for cancellation
 
     def setup(self) -> bool:
         if not LIVE_TRADING:
@@ -79,34 +84,22 @@ class Executor:
     def buy(self, token_id: str, size_usdc: float, price: float,
             neg_risk: bool = False) -> dict | None:
         """
-        Place a BUY FAK order.
-
-        Args:
-            token_id:  CLOB token ID
-            size_usdc: USDC amount to spend
-            price:     limit price (0.01 – 0.99)
-            neg_risk:  neg_risk flag for the market
+        Place a BUY GTC order.
 
         Returns:
             {"order_id": str, "filled_usdc": float, "filled_tokens": float, "price": float}
-            or None on failure / no fill.
+            or None on failure.
         """
         return self._place("BUY", token_id, size_usdc, price, neg_risk)
 
     def sell(self, token_id: str, qty_tokens: float, price: float,
              neg_risk: bool = False) -> dict | None:
         """
-        Place a SELL FAK order.
-
-        Args:
-            token_id:   CLOB token ID
-            qty_tokens: Number of tokens to sell
-            price:      limit price
-            neg_risk:   neg_risk flag for the market
+        Place a SELL GTC order.
 
         Returns:
             {"order_id": str, "filled_usdc": float, "filled_tokens": float, "price": float}
-            or None on failure / no fill.
+            or None on failure.
         """
         size_usdc = qty_tokens * price
         return self._place("SELL", token_id, size_usdc, price, neg_risk)
@@ -114,20 +107,18 @@ class Executor:
     def _place(self, side: str, token_id: str, size_usdc: float,
                price: float, neg_risk: bool) -> dict | None:
         """
-        Place an FAK order and return fill info.
+        Place a GTC order and return fill info.
 
         Returns:
             {"order_id": str, "filled_usdc": float, "filled_tokens": float, "price": float}
-            or None on failure / no fill.
+            or None on failure.
         """
         if price <= 0 or price >= 1.0:
             logger.error(f"Invalid price {price} for {side}")
             return None
 
-        # Polymarket requires: price max 2 decimals, size (tokens) max 4 decimals
         price = round(price, 2)
-        qty = size_usdc / price
-        qty = round(qty, 4)
+        qty = round(size_usdc / price, 2)
         # Polymarket requires minimum 5 tokens per order
         if qty < 5.0:
             qty = 5.0
@@ -136,7 +127,7 @@ class Executor:
         if not LIVE_TRADING:
             order_id = f"DRY_{side}_{int(time.time()*1000)}"
             logger.info(
-                f"🔒 [DRY] {side} {qty:.3f} tokens @ ${price:.2f} "
+                f"🔒 [DRY] {side} {qty:.2f} tokens @ ${price:.2f} "
                 f"= ${size_usdc:.2f} | {token_id[:16]}..."
             )
             return {
@@ -162,31 +153,23 @@ class Executor:
                     neg_risk=neg_risk,
                 )
                 signed = self._client.create_order(args, options=opts)
-                resp = self._client.post_order(signed, orderType=OrderType.FAK)
+                resp = self._client.post_order(signed, orderType=OrderType.GTC)
 
-            # Parse order ID and status
+            # Parse response
             order_id = None
-            status = ""
             if isinstance(resp, dict):
                 order_id = resp.get("orderID") or resp.get("id", "")
-                status = str(resp.get("status", "")).upper()
             elif hasattr(resp, "orderID"):
                 order_id = resp.orderID
-                status = str(getattr(resp, "status", "")).upper()
             else:
                 order_id = str(resp) if resp else None
-
-            # FAK orders that weren't filled at all
-            if status in ("UNMATCHED", "CANCELED", "KILLED"):
-                logger.warning(
-                    f"⚠️  FAK {side} not filled (status={status}) | "
-                    f"{token_id[:16]}..."
-                )
-                return None
 
             if not order_id:
                 logger.error(f"⚠️  No order ID in response: {resp}")
                 return None
+
+            # Track for cancellation when market resolves
+            self._open_orders.append(order_id)
 
             # Extract actual fill amounts from response when available
             filled_usdc = size_usdc
@@ -206,8 +189,8 @@ class Executor:
                             pass
 
             logger.info(
-                f"✅ FAK {side} ${filled_usdc:.2f} "
-                f"({filled_tokens:.3f} tokens @ ${fill_price:.2f}) | "
+                f"✅ {side} ${filled_usdc:.2f} "
+                f"({filled_tokens:.2f} tokens @ ${fill_price:.2f}) | "
                 f"ID: {order_id[:20]}..."
             )
             return {
@@ -220,6 +203,45 @@ class Executor:
         except Exception as e:
             logger.error(f"⚠️  {side} order failed: {e}")
             return None
+
+    def cancel_open_orders(self):
+        """
+        Cancel all tracked open GTC orders.
+
+        Call this when a market resolves to prevent stale resting orders
+        from filling after direction has changed.
+        """
+        if not LIVE_TRADING or self._client is None:
+            self._open_orders.clear()
+            return
+
+        if not self._open_orders:
+            return
+
+        cancelled = 0
+        for oid in self._open_orders:
+            try:
+                self._rate_limit()
+                self._client.cancel(oid)
+                cancelled += 1
+            except Exception:
+                pass  # Order may already be filled/expired
+
+        if cancelled > 0:
+            logger.info(f"🗑️  Cancelled {cancelled}/{len(self._open_orders)} open orders")
+        self._open_orders.clear()
+
+    def cancel_all(self):
+        """Cancel ALL open orders on the account (emergency stop)."""
+        if not LIVE_TRADING or self._client is None:
+            return
+        try:
+            self._rate_limit()
+            self._client.cancel_all()
+            self._open_orders.clear()
+            logger.info("🗑️  Cancelled all open orders")
+        except Exception as e:
+            logger.warning(f"⚠️  Cancel all failed: {e}")
 
     def get_balance(self) -> float:
         """

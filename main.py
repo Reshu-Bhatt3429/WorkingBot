@@ -227,6 +227,9 @@ class HedgeBot:
         else:
             outcome = "DOWN"
 
+        # Cancel any resting GTC orders before resolving
+        self.executor.cancel_open_orders()
+
         result = self.engine.resolve(asset, outcome)
         if result is None:
             return
@@ -328,6 +331,7 @@ class HedgeBot:
 
     def _shutdown(self):
         logger.info("\nShutting down...")
+        self.executor.cancel_open_orders()
         self.feed.stop()
         mkt_wr = (self.profitable_markets / self.total_markets * 100
                   if self.total_markets > 0 else 0)
