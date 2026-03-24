@@ -124,11 +124,14 @@ class Executor:
             logger.error(f"Invalid price {price} for {side}")
             return None
 
+        # Polymarket requires: price max 2 decimals, size (tokens) max 4 decimals
+        price = round(price, 2)
         qty = size_usdc / price
+        qty = round(qty, 4)
         # Polymarket requires minimum 5 tokens per order
         if qty < 5.0:
             qty = 5.0
-            size_usdc = qty * price
+        size_usdc = round(qty * price, 4)
 
         if not LIVE_TRADING:
             order_id = f"DRY_{side}_{int(time.time()*1000)}"
